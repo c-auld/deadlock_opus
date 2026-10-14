@@ -1,0 +1,32 @@
+# Godot 4 editor/import cache (regenerated automatically on open)
+.godot/
+/android/
+
+# Exported builds
+/build/
+/export/
+*.exe
+*.pck
+*.zip
+*.dmg
+*.app/
+*.x86_64
+*.apk
+*.aab
+export_presets.cfg
+export_credentials.cfg
+
+# Mono / C# (not used now, harmless if added later)
+.mono/
+data_*/
+mono_crash.*.json
+
+# Editor / OS junk
+.DS_Store
+*.tmp
+*.translation
+.vscode/
+.idea/
+
+# Local test output (playtest screenshots)
+/screenshots/
