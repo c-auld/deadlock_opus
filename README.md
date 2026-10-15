@@ -4,8 +4,23 @@ Small PS1-style first-person survival horror in the classic Resident Evil mould:
 explore three dim rooms, scrounge scarce ammo, decide which zombies are worth a
 bullet, find the Exit Keycard and get out.
 
+![A zombie shambling down the corridor in the flashlight beam](docs/screenshots/02_zombie.png)
+
 Run: open the folder in Godot 4.7 and press F5, or
 `/Applications/Godot.app/Contents/MacOS/Godot --path .`
+
+## Screenshots
+| | |
+|---|---|
+| ![Opening corridor with the controls hint](docs/screenshots/01_corridor.png) | ![Zombie reaching out in the corridor](docs/screenshots/03_attack.png) |
+| *The opening corridor* | *Too close for comfort* |
+| ![Storage room: the guard and the glinting keycard](docs/screenshots/04_storage.png) | ![Door room: terminal glow and the red keycard reader](docs/screenshots/05_door_room.png) |
+| *Storage: something guards the keycard* | *The locked EXIT and its keycard reader* |
+| ![Item screen](docs/screenshots/06_items.png) | ![Death screen](docs/screenshots/07_death.png) |
+| *Item screen (pauses the game)* | *Death* |
+
+Captured from the game itself (the 3D view renders at 320×180 and is scaled up). Regenerate them with
+`/Applications/Godot.app/Contents/MacOS/Godot --path . --script tools/capture_screenshots.gd`.
 
 ## Controls
 | Key | Action |
