@@ -1,4 +1,4 @@
-# Zombie Escape (Godot 4.7 prototype)
+# Deadlock Opus (Godot 4.7 prototype)
 
 Small PS1-style first-person survival horror in the classic Resident Evil mould:
 explore three dim rooms, scrounge scarce ammo, decide which zombies are worth a
