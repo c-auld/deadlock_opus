@@ -30,3 +30,6 @@ mono_crash.*.json
 
 # Local test output (playtest screenshots)
 /screenshots/
+
+# Claude Code worktrees
+.claude/
