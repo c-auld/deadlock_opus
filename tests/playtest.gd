@@ -12,6 +12,8 @@ func _initialize() -> void:
 	var args := OS.get_cmdline_user_args()
 	if args.size() > 0:
 		shot_dir = args[0]
+	# Leave the desktop mouse alone (also stops real mouse motion turning the view mid-test).
+	load("res://scripts/main.gd").grab_mouse = false
 	_run.call_deferred()
 
 
@@ -20,7 +22,9 @@ func _run() -> void:
 	await _t_shoot_reload()
 	await _t_zombie_combat()
 	await _t_zombie_attack_and_heal()
+	await _t_zombie_lunge()
 	await _t_pickups_inventory()
+	await _t_medkits()
 	await _t_door_and_win()
 	await _t_defeat_and_restart()
 	var fails := results.filter(func(r): return not r[1]).size()
@@ -90,6 +94,32 @@ func click() -> void:
 		await process_frame
 
 
+## Left-drag from `at` by `by` pixels in ten steps (injected mouse events).
+func drag(at: Vector2, by: Vector2) -> void:
+	var b := InputEventMouseButton.new()
+	b.button_index = MOUSE_BUTTON_LEFT
+	b.pressed = true
+	b.position = at
+	b.global_position = at
+	Input.parse_input_event(b)
+	await process_frame
+	for i in 10:
+		var m := InputEventMouseMotion.new()
+		at += by / 10.0
+		m.position = at
+		m.global_position = at
+		m.relative = by / 10.0
+		m.button_mask = MOUSE_BUTTON_MASK_LEFT
+		Input.parse_input_event(m)
+		await process_frame
+	var r: InputEventMouseButton = b.duplicate()
+	r.pressed = false
+	r.position = at
+	r.global_position = at
+	Input.parse_input_event(r)
+	await process_frame
+
+
 func place(pos: Vector3, look_at_pos: Vector3) -> void:
 	var p = main.player
 	p.global_position = pos
@@ -122,7 +152,7 @@ func park_zombies() -> void:
 func _t_movement() -> void:
 	await fresh()
 	park_zombies()
-	check("mouse captured at start", Input.mouse_mode == Input.MOUSE_MODE_CAPTURED, "mode=%d" % Input.mouse_mode)
+	check("test leaves the mouse free", Input.mouse_mode == Input.MOUSE_MODE_VISIBLE, "mode=%d" % Input.mouse_mode)
 	var p = main.player
 	var start: Vector3 = p.global_position
 	await hold(KEY_W, 1.0)
@@ -144,33 +174,68 @@ func _t_shoot_reload() -> void:
 	park_zombies()
 	var p = main.player
 	place(Vector3(0, 0.05, -3), Vector3(0, 1.5, -20))
-	check("starts with 6 loaded, 0 spare", p.mag == 6 and p.reserve == 0, "%d|%d" % [p.mag, p.reserve])
+	check("starts with 9+1 loaded, 0 spare", p.mag == 9 and p.chambered and p.reserve == 0, "%d+%s|%d" % [p.mag, p.chambered, p.reserve])
+	check("HUD shows ammo as 'loaded / reserve'", main.ammo_label.text.strip_edges() == "10 / 0", main.ammo_label.text)
 	await click()
 	await process_frame
-	check("click fires (mag 6->5)", p.mag == 5, "mag=%d" % p.mag)
+	check("click fires (10->9)", p.rounds() == 9, "rounds=%d" % p.rounds())
 	check("muzzle flash shown", p.muzzle_flash.visible or p.flash_t > -0.1, "")
 	await snap("shoot_flash")
 	await click()
-	check("fire-rate limit (instant 2nd click ignored)", p.mag == 5, "mag=%d" % p.mag)
+	check("fire-rate limit (instant 2nd click ignored)", p.rounds() == 9, "rounds=%d" % p.rounds())
 	await wait(0.35)
 	await click()
-	check("second shot after delay", p.mag == 4, "mag=%d" % p.mag)
+	check("second shot after delay", p.rounds() == 8, "rounds=%d" % p.rounds())
+	await wait(0.1)
+	check("muzzle flash gone after ~50ms", not p.muzzle_flash.visible, "")
 	await tap(KEY_R)
 	check("R with no spare ammo does not reload", p.reloading == 0.0 and main.msg_label.text.contains("No spare"), main.msg_label.text)
-	p.reserve = 10
+
+	# Tactical reload: rounds left, so swap the magazine only -> 15 + 1 chambered.
+	p.reserve = 30
 	await tap(KEY_R)
-	check("R starts reload", p.reloading > 0.0, "")
+	check("R starts reload", p.reloading > 0.0 and not p.reload_empty, "")
+	check("tactical reload is 1.2-1.8s", p.reloading >= 1.2 and p.reloading <= 1.8, "%.2fs" % p.reloading)
 	await wait(0.3)
+	var shots := [0]
+	p.fired.connect(func(_h): shots[0] += 1)
 	await click()
-	check("can't fire while reloading", p.mag == 4, "mag=%d" % p.mag)
-	await wait(1.3)
-	check("reload fills mag from reserve", p.mag == 8 and p.reserve == 6, "%d|%d" % [p.mag, p.reserve])
-	check("HUD shows ammo", main.ammo_label.text.strip_edges() == "8 | 6", main.ammo_label.text)
+	check("can't fire while reloading", shots[0] == 0, "shots=%d" % shots[0])
+	await wait(1.2)
+	check("tactical reload = full mag + chambered (16)", p.rounds() == 16 and p.reserve == 22, "%d / %d" % [p.rounds(), p.reserve])
+	await tap(KEY_R)
+	check("R when full does nothing", p.reloading == 0.0, "")
+
+	# Run it dry: the slide locks back on the last shot, then the trigger just clicks.
 	p.mag = 0
+	p.fire_cd = 0.0
+	await click()
+	check("last round locks the slide back", not p.chambered and p.slide_locked, "")
+	await wait(0.35)
+	var reserve_before: int = p.reserve
+	await click()
+	check("empty gun dry-fires, no shot", p.rounds() == 0 and p.reserve == reserve_before and main.msg_label.text.contains("Empty"), main.msg_label.text)
+
+	# Empty reload: mag out, mag in, slide release -> 15 rounds.
+	await tap(KEY_R)
+	check("empty reload starts", p.reloading > 0.0 and p.reload_empty, "")
+	check("empty reload is 1.2-1.8s", p.reloading >= 1.2 and p.reloading <= 1.8, "%.2fs" % p.reloading)
+	await wait(0.6)
+	await snap("reload_mag_out")
+	check("slide stays locked until released", p.slide_locked, "")
+	await wait(1.1)
+	check("empty reload = full magazine (15), slide forward", p.rounds() == 15 and p.chambered and not p.slide_locked and p.reserve == 7, "%d / %d" % [p.rounds(), p.reserve])
+
+	# Pickup into an empty gun only adds to the reserve.
+	p.mag = 0
+	p.chambered = false
+	p.reserve = 0
+	main._collect({"kind": "ammo", "amount": 5, "node": Node.new()})
+	check("ammo pickup goes to reserve, gun stays empty", p.rounds() == 0 and p.reserve == 5, "%d / %d" % [p.rounds(), p.reserve])
 	p.reserve = 0
 	await wait(0.35)
 	await click()
-	check("empty gun clicks, no shot", p.mag == 0 and main.msg_label.text.contains("Out of ammo"), main.msg_label.text)
+	check("out of ammo message", main.msg_label.text.contains("Out of ammo"), main.msg_label.text)
 
 
 func _t_zombie_combat() -> void:
@@ -252,10 +317,10 @@ func _t_zombie_attack_and_heal() -> void:
 	await wait(0.1)
 	check("DANGER state at 30hp", main.health_label.text == "DANGER", main.health_label.text)
 	await tap(KEY_TAB)
-	# items: Handgun, First Aid Spray
+	# items: Handgun, First Aid Kit
 	await tap(KEY_DOWN)
 	await tap(KEY_ENTER)
-	check("using First Aid Spray heals +60", p.health == 90 and main.heal_count == 0, "health=%d heals=%d" % [p.health, main.heal_count])
+	check("using First Aid Kit heals +60", p.health == 90 and main.heal_count == 0, "health=%d heals=%d" % [p.health, main.heal_count])
 	await tap(KEY_TAB)
 	check("inventory closes", main.state == main.State.PLAY and not paused, "")
 
@@ -264,20 +329,21 @@ func _t_pickups_inventory() -> void:
 	await fresh()
 	park_zombies()
 	var p = main.player
-	check("4 pickups placed", main.pickups.size() == 4, str(main.pickups.size()))
+	check("6 pickups placed (2 ammo, kit, key, 2 med kits)", main.pickups.size() == 6, str(main.pickups.size()))
 	place(Vector3(0, 0.05, -21.0), Vector3(-0.9, 0.2, -21.0))
 	await wait(0.1)
 	check("pickup prompt shown", main.prompt_label.text.contains("Handgun Ammo"), main.prompt_label.text)
 	await snap("ammo_pickup")
 	await tap(KEY_E)
-	check("E collects ammo (+5 reserve)", p.reserve == 5 and main.pickups.size() == 3, "reserve=%d" % p.reserve)
+	check("E collects ammo (+5 reserve)", p.reserve == 5 and main.pickups.size() == 5, "reserve=%d" % p.reserve)
 	place(Vector3(-2.7, 0.05, -7.3), Vector3(-3.6, 0.2, -7.5))
 	await wait(0.1)
 	await tap(KEY_E)
-	check("E collects First Aid Spray", main.heal_count == 1, "heals=%d" % main.heal_count)
+	check("E collects First Aid Kit", main.heal_count == 1, "heals=%d" % main.heal_count)
 
 	# Inventory: open, contents, pause, use ammo, refuse heal at full health.
 	p.mag = 3
+	p.chambered = true
 	var z = main.zombies[1]
 	z.set_physics_process(true)
 	z.global_position = Vector3(0, 0, -11)
@@ -289,19 +355,30 @@ func _t_pickups_inventory() -> void:
 		names.append(main.inv_list.get_item_text(i).strip_edges())
 	check("inventory lists weapon, ammo, heal", names[0].begins_with("Handgun") and names[1].begins_with("Handgun Ammo") and names[2].begins_with("First Aid"), str(names))
 	await snap("inventory")
+	main.inv_list.select(0)
+	main._on_inv_selected(0)
+	await process_frame
+	check("item viewer shows the selected item's model", main.preview_id == "handgun" and main.preview_pivot.get_child_count() > 0, main.preview_id)
+	var rot0: Vector3 = main.preview_pivot.rotation
+	await drag(main.inv_preview.get_global_rect().get_center(), Vector2(120, 40))
+	check("dragging rotates the item viewer", main.preview_pivot.rotation.distance_to(rot0) > 0.5 and not main.preview_drag, "%s" % (main.preview_pivot.rotation - rot0))
+	main.inv_list.select(1)
+	main._on_inv_selected(1)
+	await process_frame
+	check("viewer swaps model with the selection", main.preview_id == "ammo", main.preview_id)
 	var zpos: Vector3 = z.global_position
 	await wait(1.0)
 	check("world frozen while inventory open", zpos.distance_to(z.global_position) < 0.01, "")
-	await tap(KEY_DOWN)  # Handgun Ammo
-	await tap(KEY_ENTER)
-	check("using ammo loads the handgun", p.mag == 8 and p.reserve == 0, "%d|%d" % [p.mag, p.reserve])
-	# Ammo stack is gone now; list = Handgun, First Aid Spray.
-	main.inv_list.select(1)
-	main._on_inv_selected(1)
+	main.inv_list.select(2)  # First Aid Kit
+	main._on_inv_selected(2)
 	await tap(KEY_ENTER)
 	check("heal refused at full health (not wasted)", main.heal_count == 1 and main.inv_desc.text.contains("already"), main.inv_desc.text)
-	await tap(KEY_TAB)
-	check("Tab closes inventory", main.state == main.State.PLAY and not paused, "")
+	main.inv_list.select(1)  # Handgun Ammo
+	main._on_inv_selected(1)
+	await tap(KEY_ENTER)
+	check("using ammo closes the items and starts a reload", main.state == main.State.PLAY and not paused and p.reloading > 0.0, "")
+	await wait(1.6)
+	check("...which loads the handgun", p.rounds() == 9 and p.reserve == 0, "%d / %d" % [p.rounds(), p.reserve])
 	z.set_physics_process(false)
 
 	# Key item in storage; taking it wakes the corridor "corpse".
@@ -318,6 +395,35 @@ func _t_pickups_inventory() -> void:
 	check("I key also opens inventory; keycard listed", main.state == main.State.INVENTORY and has_key_row, "")
 	await tap(KEY_ESCAPE)
 	check("Esc closes inventory", main.state == main.State.PLAY, "")
+
+
+func _t_medkits() -> void:
+	await fresh()
+	park_zombies()
+	var p = main.player
+	var kits: Array = main.pickups.filter(func(k): return k.kind == "medkit")
+	var kit: Dictionary = kits[0]
+	var at: Vector3 = kit.node.global_position
+	place(at + Vector3(-2.0, 0.05, 0), at)
+	await wait(0.1)
+	check("no [E] prompt for walk-over med kits", not main.prompt_label.text.contains("Pick up"), main.prompt_label.text)
+	# Full health: walking over it leaves it there.
+	place(at + Vector3(0, 0.05, 0), at + Vector3(0, 0, -1))
+	await wait(0.2)
+	check("med kit ignored at full health", main.pickups.has(kit) and p.health == 100, "health=%d" % p.health)
+	await snap("medkit")
+	# Hurt: walk onto it -> +50, removed.
+	p.health = 40
+	place(at + Vector3(-1.5, 0.05, 0), at + Vector3(0, 0.2, 0))
+	await hold(KEY_W, 1.2)
+	check("walking over a med kit heals +50", p.health == 90, "health=%d" % p.health)
+	check("used med kit is removed", not main.pickups.has(kit) and main.pickups.size() == 5, str(main.pickups.size()))
+	# Heal is capped at max health.
+	p.health = 80
+	var at2: Vector3 = kits[1].node.global_position
+	place(at2 + Vector3(0, 0.05, 0), at2 + Vector3(0, 0, -1))
+	await wait(0.2)
+	check("med kit heal capped at 100", p.health == 100 and main.pickups.size() == 4, "health=%d" % p.health)
 
 
 func _t_door_and_win() -> void:
@@ -347,6 +453,34 @@ func _t_door_and_win() -> void:
 	await wait(2.0)
 	check("victory screen", main.end_panel.visible and main.end_title.text == "YOU ESCAPED", main.end_sub.text)
 	await snap("win")
+
+
+func _t_zombie_lunge() -> void:
+	await fresh()
+	park_zombies()
+	var p = main.player
+	var z = main.zombies[1]
+	var screams := [0]
+	z.scream.connect(func(): screams[0] += 1)
+	z.set_physics_process(true)
+	place(Vector3(0, 0.05, -12), Vector3(0, 1.6, -20))
+	# Chasing from outside lunge range: plain shamble, no scream.
+	z.global_position = Vector3(0, 0, -18)
+	z._start_chase()
+	await wait(0.5)
+	check("no lunge from far away", screams[0] == 0 and z.lunge_t < 0.0, "screams=%d" % screams[0])
+	# Close in: it screams, rears back, then charges faster than it shambles.
+	z.global_position = Vector3(0, 0, -15.6)
+	await wait(0.1)
+	check("screams and lunges when close", screams[0] == 1 and z.lunge_t >= 0.0, "screams=%d lunge_t=%.2f" % [screams[0], z.lunge_t])
+	await wait(z.SCREAM_TIME)
+	await snap("lunge")
+	var d0: float = z._flat_dist(p.global_position)
+	await wait(0.6)
+	var d1: float = z._flat_dist(p.global_position)
+	check("lunge is faster than the shamble (~2 m/s)", (d0 - d1) / 0.6 > 1.6, "%.2f m/s" % ((d0 - d1) / 0.6))
+	await wait(1.5)
+	check("lunge ends in a hit", p.health == 75, "health=%d" % p.health)
 
 
 func _t_defeat_and_restart() -> void:

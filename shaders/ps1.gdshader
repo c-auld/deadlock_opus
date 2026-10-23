@@ -8,6 +8,7 @@ uniform bool world_uv = false;
 uniform float tex_scale = 0.5;
 uniform vec4 emission_color : source_color = vec4(0.0, 0.0, 0.0, 1.0);
 uniform float emission_energy = 0.0;
+uniform float self_glow = 0.0;  // glow in the texture's own colours (for emissive-textured models)
 uniform float snap_div = 1.5;
 uniform float affine_amount = 0.7;
 
@@ -42,5 +43,5 @@ void fragment() {
 	vec2 uv = mix(persp_uv, aff_uv.xy / aff_uv.z, affine_amount);
 	vec4 c = texture(albedo_tex, uv) * tint;
 	ALBEDO = c.rgb;
-	EMISSION = emission_color.rgb * emission_energy;
+	EMISSION = emission_color.rgb * emission_energy + c.rgb * self_glow;
 }
