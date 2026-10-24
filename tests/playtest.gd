@@ -25,6 +25,7 @@ func _run() -> void:
 	await _t_zombie_lunge()
 	await _t_pickups_inventory()
 	await _t_medkits()
+	await _t_lockers()
 	await _t_door_and_win()
 	await _t_defeat_and_restart()
 	var fails := results.filter(func(r): return not r[1]).size()
@@ -329,13 +330,13 @@ func _t_pickups_inventory() -> void:
 	await fresh()
 	park_zombies()
 	var p = main.player
-	check("6 pickups placed (2 ammo, kit, key, 2 med kits)", main.pickups.size() == 6, str(main.pickups.size()))
+	check("7 pickups placed (2 ammo, kit, key, 2 med kits, 1 in a locker)", main.pickups.size() == 7, str(main.pickups.size()))
 	place(Vector3(0, 0.05, -21.0), Vector3(-0.9, 0.2, -21.0))
 	await wait(0.1)
 	check("pickup prompt shown", main.prompt_label.text.contains("Handgun Ammo"), main.prompt_label.text)
 	await snap("ammo_pickup")
 	await tap(KEY_E)
-	check("E collects ammo (+5 reserve)", p.reserve == 5 and main.pickups.size() == 5, "reserve=%d" % p.reserve)
+	check("E collects ammo (+5 reserve)", p.reserve == 5 and main.pickups.size() == 6, "reserve=%d" % p.reserve)
 	place(Vector3(-2.7, 0.05, -7.3), Vector3(-3.6, 0.2, -7.5))
 	await wait(0.1)
 	await tap(KEY_E)
@@ -417,19 +418,103 @@ func _t_medkits() -> void:
 	place(at + Vector3(-1.5, 0.05, 0), at + Vector3(0, 0.2, 0))
 	await hold(KEY_W, 1.2)
 	check("walking over a med kit heals +50", p.health == 90, "health=%d" % p.health)
-	check("used med kit is removed", not main.pickups.has(kit) and main.pickups.size() == 5, str(main.pickups.size()))
+	check("used med kit is removed", not main.pickups.has(kit) and main.pickups.size() == 6, str(main.pickups.size()))
 	# Heal is capped at max health.
 	p.health = 80
 	var at2: Vector3 = kits[1].node.global_position
 	place(at2 + Vector3(0, 0.05, 0), at2 + Vector3(0, 0, -1))
 	await wait(0.2)
-	check("med kit heal capped at 100", p.health == 100 and main.pickups.size() == 4, "health=%d" % p.health)
+	check("med kit heal capped at 100", p.health == 100 and main.pickups.size() == 5, "health=%d" % p.health)
+
+
+func _t_lockers() -> void:
+	await fresh()
+	park_zombies()
+	var p = main.player
+	var l: Dictionary = main.lockers[3]  # the grey locker, med kit inside
+	var kit: Dictionary = l.items[0] if l.items.size() > 0 else {}
+	var front: Vector3 = l.root.global_transform * Vector3(0, 0, l.size.z * 0.5)
+	check("5 lockers, all shut, med kit in the grey one", main.lockers.size() == 5 and main.lockers.all(func(x): return x.swing == 0.0) and kit.get("kind") == "medkit", "%d" % main.lockers.size())
+	# Shut: hidden and out of reach even pressed right up against the door.
+	p.health = 50
+	place(front + Vector3(-0.6, 0.05, 0), front + Vector3(0, 0.9, 0))
+	await hold(KEY_W, 0.6)
+	check("pressed against the shut locker (x=%.2f)" % p.global_position.x, p.global_position.x > front.x - 0.45, "")
+	check("shut locker: med kit hidden, still and not taken", not kit.node.visible and p.health == 50 and kit.mesh.rotation.y == 0.0 and main.pickups.has(kit), "health=%d" % p.health)
+	check("open prompt when facing it", main.prompt_label.text == "[E] Open locker", main.prompt_label.text)
+	# Open (at full health so the kit stays put).
+	p.health = 100
+	place(front + Vector3(-1.0, 0.05, -0.15), front + Vector3(0, 0.9, 0))
+	await tap(KEY_E)
+	check("E on the door shows the med kit at once (door not moved yet)", kit.node.visible and l.swing == 0.0, "swing=%.2f" % l.swing)
+	await wait(0.2)
+	check("mid-swing: med kit visible but still, out of reach", l.swing > 0.0 and l.swing < 1.0 and kit.node.visible and kit.mesh.rotation.y == 0.0 and main._target_pickup().is_empty(), "swing=%.2f" % l.swing)
+	await wait(0.5)
+	var angle := rad_to_deg(l.pivot.rotation.y)
+	check("door swings fully open (%.0f deg) in ~0.5s" % angle, l.swing == 1.0 and absf(angle - main.LOCKER_OPEN_ANGLE) < 0.01, "")
+	var y0: float = kit.mesh.position.y
+	await wait(0.3)
+	check("open: med kit visible and bouncing/spinning", kit.node.visible and (kit.mesh.position.y != y0 or kit.mesh.rotation.y != 0.0), "")
+	check("close prompt", main.prompt_label.text == "[E] Close locker", main.prompt_label.text)
+	place(front + Vector3(-0.5, 0.05, -0.05), front + Vector3(0, 0.9, 0))
+	await hold(KEY_W, 0.6)
+	check("full health: med kit left in the open locker", main.pickups.has(kit), "")
+	# Close: hidden at once, back at rest.
+	place(front + Vector3(-1.0, 0.05, -0.15), front + Vector3(0, 0.9, 0))
+	await tap(KEY_E)
+	await wait(0.05)
+	check("closing: med kit stops at rest, still visible while the door swings", kit.node.visible and kit.mesh.rotation.y == 0.0 and is_equal_approx(kit.mesh.position.y, kit.rest_y), "")
+	await wait(0.6)
+	check("door shuts again, med kit hidden", l.swing == 0.0 and absf(l.pivot.rotation.y) < 0.001 and not kit.node.visible, "swing=%.2f" % l.swing)
+	# The door stops rather than swing through the player standing in its arc.
+	var hinge: Vector3 = l.root.global_transform * l.pivot.position
+	place(hinge + Vector3(-0.5, 0.05, 0.05), front + Vector3(0, 0.9, 0))
+	main._toggle_locker(l)
+	await wait(0.7)
+	check("door blocked by the player stops part-way", l.swing < 1.0, "swing=%.2f" % l.swing)
+	place(front + Vector3(-1.2, 0.05, -0.3), front + Vector3(0, 0.9, 0))
+	await wait(0.7)
+	check("and finishes opening once they step away", l.swing == 1.0, "swing=%.2f" % l.swing)
+	# The open door is solid: walk along the row into it.
+	place(Vector3(front.x - 0.35, 0.05, hinge.z - 1.0), Vector3(front.x - 0.35, 1.6, hinge.z + 2.0))
+	await hold(KEY_W, 1.0)
+	check("open door blocks the player", p.global_position.z < hinge.z - 0.3, "z=%.2f hinge z=%.2f" % [p.global_position.z, hinge.z])
+	# Hurt: walk up to the open locker and the kit heals as usual.
+	p.health = 40
+	place(front + Vector3(-0.8, 0.05, -0.1), front + Vector3(0, 0.9, -0.1))
+	await hold(KEY_W, 0.8)
+	check("open locker: walking up to the med kit heals +50", p.health == 90 and not main.pickups.has(kit) and l.items.is_empty(), "health=%d" % p.health)
+	place(Vector3(12.5, 0.05, -27.4), Vector3(14.0, 1.6, -27.4))
+	await hold(KEY_W, 1.0)
+	check("lockers block the player", p.global_position.x < 13.3, "x=%.2f" % p.global_position.x)
 
 
 func _t_door_and_win() -> void:
 	await fresh()
 	park_zombies()
 	var p = main.player
+	# Terminal (IBM 5155 on the desk): prompt, log text, desk blocks the player.
+	place(Vector3(24.0, 0.05, -34.9), Vector3(24.0, 1.05, -36.4))
+	await wait(0.1)
+	check("terminal prompt", main.prompt_label.text == "[E] Read terminal", main.prompt_label.text)
+	await tap(KEY_E)
+	check("E zooms into the terminal (reading, player frozen)", main.state == main.State.READING and not p.enabled and main.term_cam.current, "state=%d" % main.state)
+	await wait(main.TERMINAL_ZOOM_TIME + 0.7)
+	check("log starts typing on the screen", main.term_typing and main.term_shown > 0 and main.term_shown < main.term_full.length(), "%d/%d" % [main.term_shown, main.term_full.length()])
+	await tap(KEY_E)
+	await wait(0.1)
+	check("E skips to the full log", main.term_label.text.begins_with(main.TERMINAL_HEADER + main.TERMINAL_LOG) and main.prompt_label.text == "[E] Close", main.term_label.text)
+	await tap(KEY_E)
+	await wait(main.TERMINAL_ZOOM_TIME)
+	check("E closes the terminal, control returns", main.state == main.State.PLAY and p.enabled and p.cam.current, "state=%d" % main.state)
+	# A zombie hit while reading snaps you out and still hurts.
+	await tap(KEY_E)
+	await wait(0.3)
+	main._on_zombie_attack(25, main.zombies[1])
+	check("zombie hit exits the terminal and deals damage", main.state == main.State.PLAY and p.cam.current and p.health == 75, "state=%d health=%d" % [main.state, p.health])
+	p.health = 100
+	await hold(KEY_W, 1.0)
+	check("terminal desk blocks the player", p.global_position.z > -36.0, "z=%.2f" % p.global_position.z)
 	place(Vector3(26.4, 0.05, -31.5), Vector3(30, 1.6, -31.5))
 	await wait(0.1)
 	check("door prompt (locked)", main.prompt_label.text.contains("locked"), main.prompt_label.text)

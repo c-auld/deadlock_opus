@@ -97,6 +97,23 @@ func _run() -> void:
 	_view(Vector3(17.5, 0.05, -31.3), Vector3(18.8, 0.25, -32.3))
 	await _snap("11_medkit")
 
+	# 12. Storage lockers: the grey one swung open, its med kit hopping inside.
+	var locker: Dictionary = main.lockers[3]
+	main._toggle_locker(locker)
+	_view(Vector3(11.6, 0.05, -27.5), Vector3(13.6, 0.8, -26.5))
+	await _settle(1.0)
+	await _snap("12_locker")
+
+	# 13. Reading the IBM 5155: zoomed into the screen with the log typed out.
+	_view(Vector3(24.0, 0.05, -34.9), Vector3(24.0, 1.05, -36.4))
+	await _settle(0.2)
+	main._open_terminal()
+	await _settle(main.TERMINAL_ZOOM_TIME + 0.5)
+	main.term_shown = main.term_full.length()
+	main.term_typing = false
+	await _snap("13_terminal")
+	main._close_terminal(true)
+
 	# 9. Item screen with the 3D handgun in the viewer.
 	p.reserve = 5
 	p.mag = 3

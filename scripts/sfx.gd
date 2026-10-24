@@ -8,6 +8,7 @@ const GUNSHOT_VOLUME := 0.8
 const ZOMBIE_ATTACK_VOLUME := 1.0
 const GUN_FOLEY_VOLUME := 0.8  # dry fire, magazine out/in, slide rack
 const SYNTH_VOLUME := 0.7  # heartbeat, player footsteps, beeps
+const LOCKER_VOLUME := 0.8  # locker door open/close
 # ------------------------------------------------------------------------------------
 
 const AMBIENCE := preload("res://audio/ambience_old_factory.wav")  # loops (set in its .import)
@@ -21,6 +22,8 @@ const GUN_FOLEY := {
 	"mag_in": [preload("res://audio/mag_in.wav"), 0.32],
 	"slide_rack": [preload("res://audio/slide_rack.wav"), 0.22],  # forward slam; pull-back click at 0.06
 }
+# Locker door sounds: res:// paths to audio files, or "" for silence (no suitable files yet).
+const LOCKER_SOUNDS := {"open": "", "close": ""}
 const RATE := 22050.0
 
 var pb: AudioStreamGeneratorPlayback
@@ -29,6 +32,8 @@ var heart_bpm := 70.0
 var heart_ph := 0.0
 var step_env := 0.0
 var step_lp := 0.0
+var key_env := 0.0
+var key_hp := 0.0
 var tone_queue: Array = []  # [freq, dur, vol, wave(0=square,1=saw)]
 var tone_t := 0.0
 var tone_ph := 0.0
@@ -98,6 +103,11 @@ func make_zombie_voice(z: Node3D) -> AudioStreamPlayer3D:
 	return v
 
 
+## Short plasticky key click for terminal typing (placeholder synth until there's a file).
+func key_click() -> void:
+	key_env = randf_range(0.5, 0.9)
+
+
 func step() -> void:
 	step_env = 1.0
 
@@ -141,6 +151,19 @@ func gun_sound(cue: String) -> void:
 		foley[cue].play()
 
 
+## Locker door open/close from the locker's position (silent while LOCKER_SOUNDS is empty).
+func locker_sound(cue: String, at: Node3D) -> void:
+	if LOCKER_SOUNDS.get(cue, "") == "":
+		return
+	var v := AudioStreamPlayer3D.new()
+	v.stream = load(LOCKER_SOUNDS[cue])
+	v.volume_db = linear_to_db(LOCKER_VOLUME)
+	v.position.y = 1.0
+	at.add_child(v)
+	v.finished.connect(v.queue_free)
+	v.play()
+
+
 func pickup() -> void:
 	tone(880.0, 0.06)
 	tone(1320.0, 0.1)
@@ -169,6 +192,11 @@ func _process(_delta: float) -> void:
 			if b > 0.0:
 				h += 0.7 * sin(TAU * 48.0 * b) * exp(-b * 28.0)
 			s += h * heart_vol
+
+		if key_env > 0.001:
+			key_hp += (nz - key_hp) * 0.6  # mostly high-frequency noise
+			s += (nz - key_hp) * key_env * 0.35
+			key_env *= 0.993
 
 		if step_env > 0.001:
 			step_lp += (nz - step_lp) * 0.25

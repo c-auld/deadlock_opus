@@ -18,10 +18,12 @@ Run: open the folder in Godot 4.7 and press F5, or
 | *Get too close and it screams, then lunges* | *Muzzle flash lights up the corridor* |
 | ![Empty reload: the spent magazine drops out of the grip](docs/screenshots/06_reload.png) | ![A walk-over first aid kit in the flashlight beam](docs/screenshots/11_medkit.png) |
 | *Empty reload, slide locked back* | *Walk-over first aid kit* |
-| ![Storage room: the guard and the glinting keycard](docs/screenshots/07_storage.png) | ![Door room: terminal glow and the red keycard reader](docs/screenshots/08_door_room.png) |
-| *Storage: something guards the keycard* | *The locked EXIT and its keycard reader* |
+| ![Storage room: the guard and the glinting keycard](docs/screenshots/07_storage.png) | ![Door room: the amber-lit IBM 5155 terminal and the red keycard reader](docs/screenshots/08_door_room.png) |
+| *Storage: something guards the keycard* | *The IBM 5155 terminal and the locked EXIT* |
 | ![Item screen with a rotatable 3D model of the handgun](docs/screenshots/09_items.png) | ![Death screen](docs/screenshots/10_death.png) |
 | *Item screen: drag the 3D model to rotate it* | *Death* |
+| ![An open storage locker with a first aid kit hopping inside](docs/screenshots/12_locker.png) | ![Zoomed into the IBM 5155 screen, the staff log typed out in amber](docs/screenshots/13_terminal.png) |
+| *Lockers open with E; items inside appear once you do* | *Reading the terminal* |
 
 Captured from the game itself (the 3D view renders at 320×180 and is scaled up). Regenerate them with
 `/Applications/Godot.app/Contents/MacOS/Godot --path . --script tools/capture_screenshots.gd`.
@@ -34,7 +36,7 @@ Captured from the game itself (the 3D view renders at 320×180 and is scaled up)
 | Left mouse | fire handgun |
 | R | reload (also restart after win/death) |
 | Tab or I | items (pauses the game) — Up/Down select, Enter use, drag the model to rotate it, Tab/Esc close |
-| E | pick up / use door / read terminal |
+| E | pick up / open or close locker / use door / read terminal |
 | F | flashlight |
 
 ## Design
@@ -80,15 +82,26 @@ Captured from the game itself (the 3D view renders at 320×180 and is scaled up)
   Pickups spin and hop with a small landing squash, stepped at 12 fps. Ammo goes to the
   reserve; using it from the item screen closes the screen and starts a reload. The First Aid Kit is refused
   at full health so it can't be wasted.
+- **Lockers** (storage room): five lockers, numbered 0-4 from the entrance end. E opens or closes
+  the one you're facing. The door swings about 100° in 0.5s, stepped at 12 fps. It is solid open
+  or shut, and it waits rather than swing through you or a zombie. Items inside are hidden while it's
+  shut and appear the moment you press E, sitting still; once the door is fully open they hop,
+  spin and get picked up like any other pickup. Closing settles them at once and hides them when
+  the door is shut. Put items in with `_add_locker_pickup(locker, kind, amount)` in
+  `_build_pickups()` (up to two per locker: bottom, then shelf); they are shrunk and their hop is
+  lowered if needed so they never touch the walls, shelf or door. Swing angle and speed are
+  `LOCKER_OPEN_ANGLE`, `LOCKER_SWING_TIME` and `LOCKER_ANIM_FPS` at the top of `scripts/main.gd`.
+  There are no door sounds yet; set file paths in `LOCKER_SOUNDS` in `scripts/sfx.gd`.
 - **Scarcity**: 20 rounds total vs. 3 zombies × 5 HP. Killing everything is possible but tight;
   avoiding the optional closet zombie is the safe play.
 
 ## Level walkthrough (spoilers)
 1. Corridor A — ammo box tucked behind the crates. A side closet holds a sleeping zombie and,
    behind it, the First Aid Kit (optional risk/reward).
-2. Corridor B → STORAGE room — a zombie guards the Exit Keycard on a crate.
+2. Corridor B → STORAGE room — a zombie guards the Exit Keycard on a crate; a row of lockers lines the east wall (E opens them; the grey one holds a med kit).
 3. Taking the keycard makes the "corpse" lying in corridor B get up.
-4. Door room — second ammo box in the corner, terminal log hints at the keycard, red keycard reader
+4. Door room — second ammo box in the corner, IBM 5155 terminal (E zooms into the screen and the log types out; E skips/closes, a zombie hit
+   snaps you out) hints at the keycard, red keycard reader
    by the EXIT door. E at the door with the keycard opens it; walk out to win.
 
 ## Validation
@@ -97,7 +110,7 @@ Captured from the game itself (the 3D view renders at 320×180 and is scaled up)
 ```
 /Applications/Godot.app/Contents/MacOS/Godot --path . --script tests/playtest.gd [-- /dir/for/screenshots/]
 ```
-Result: **78/78 checks pass.** The test sets `grab_mouse = false` on `main.gd`, so it
+Result: **102/102 checks pass.** The test sets `grab_mouse = false` on `main.gd`, so it
 never captures your desktop mouse and real mouse movement can't turn the view (the likely cause of
 earlier intermittent movement failures). Mouse capture itself is therefore not covered by the test.
 not confirmed, possibly real mouse input reaching the test window). Waits and key-holds use simulated physics ticks
@@ -121,6 +134,10 @@ and re-send held keys each tick, so the test is stable even when its window is i
   shows the selected item and follows the selection, mouse drag rotates it, using ammo closes
   the screen and reloads, heal refused at full health, Tab and Esc close.
 - Collection: E picks up ammo (+5), First Aid Kit, Exit Keycard; prompt shown; keycard wakes the corpse.
+- Lockers: shut lockers hide their item and keep it out of reach even when you press against them; prompt;
+  E shows the item immediately (still, out of reach mid-swing), opens to 100°, then it animates;
+  full-health rule; closing settles it at once and hides it when shut; the door stops for a player in its arc and finishes once they move; the
+  open door and the cabinets block the player; walking up to the open locker's med kit heals +50.
 - Locked door: locked prompt, E without key refuses, door physically blocks, keycard opens it.
 - Victory: walking out shows YOU ESCAPED. Defeat: health 0 shows YOU DIED. R restarts.
 
@@ -148,3 +165,5 @@ Audio files live in `audio/`; volume levels are the constants at the top of `scr
 - Pistol model: USP from the PSX Pistol Pack by Doctor_sci3nce (https://doctor-sci3nce.itch.io/), licensed CC-BY for non-commercial use.
 - Ammo box model: "9mm" box from the PSX Ammo Boxes pack by Doctor_sci3nce (https://doctor-sci3nce.itch.io/)
 - First aid kit model: "Health kit" from the PSX Med Pack by Retro Assets Library (https://retroassetslibrary.itch.io/). Free to use and share, but not to be resold.
+- IBM 5155 computer model by plewr (https://plewr.itch.io/), license: TBD
+- Locker model by TridentGame (https://tridentgame.itch.io/), license: TBD
