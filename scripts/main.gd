@@ -10,9 +10,34 @@ const Sfx := preload("res://scripts/sfx.gd")
 const AMMO_BOX := preload("res://assets/models/ammo_9mm/ammo_9mm.fbx")
 const AMMO_BOX_TEX := preload("res://assets/models/ammo_9mm/ammo_9mm_tex.png")
 const AMMO_BOX_LENGTH := 0.28  # metres, longest side
+const IBM_5155 := preload("res://assets/models/ibm_5155/ibm_5155.glb")
+const IBM_5155_WIDTH := 0.75  # metres; 1.5x the real machine (~50 x 43 x 20 cm) so it reads in-game
+const DESK_TOP := 0.9  # height of the terminal desk's top
 const MEDKIT := preload("res://assets/models/medkit/medkit.glb")
 const MEDKIT_TEX := preload("res://assets/models/medkit/medkit_T_Med_Kit_1.png")
 const MEDKIT_LENGTH := 0.3  # metres, longest side
+const LOCKER_MODELS := {
+	"dark": preload("res://assets/models/locker/locker_dark.glb"),
+	"grey": preload("res://assets/models/locker/locker_grey.glb"),
+}
+const LOCKER_HEIGHT := 1.8  # metres; the model is 1.61 tall, scaled up to a full-size locker
+# Storage room locker row along the east wall, numbered 0-4 from the entrance end.
+# Their contents are set in _build_pickups().
+const LOCKER_ROW_CENTRE := Vector3(13.85, 0.0, -27.0)  # x = inner face of the wall
+const LOCKER_ROW := ["dark", "dark", "dark", "grey", "dark"]
+# Locker doors: how far they swing open (degrees), seconds for a full swing, and the frame
+# rate the swing is stepped at for stiff PS1-style motion.
+const LOCKER_OPEN_ANGLE := 100.0
+const LOCKER_SWING_TIME := 0.5
+const LOCKER_ANIM_FPS := 12.0
+const LOCKER_REACH := 1.6  # metres from your eye to the locker front for the open/close prompt
+# Space inside a locker in model units (origin bottom centre, door side +Z): the tall lower
+# compartment, then the shelf at the top. Items fill them in that order, one each.
+const LOCKER_SLOTS := [
+	AABB(Vector3(-0.181, 0.057, -0.159), Vector3(0.362, 1.269, 0.314)),
+	AABB(Vector3(-0.181, 1.346, -0.159), Vector3(0.362, 0.201, 0.314)),
+]
+const LOCKER_ITEM_MARGIN := 0.015  # metres kept clear between a spinning, hopping item and the walls
 # Pickup hop (ammo, first aid kits, keycard): height (m), hops per second, spin (rad/s), and the frame rate the motion
 # is stepped at for a choppy PSX look.
 const PICKUP_HOP := 0.14
@@ -63,8 +88,16 @@ const ITEM_DESC := {
 	"key": "Keycard marked EXIT.\nUse it at the security door,\nor press [E] at the door.",
 }
 const TERMINAL_LOG := "STAFF LOG: Exit keycard is in STORAGE. Don't go in there alone."
+const TERMINAL_HEADER := "C:\\>TYPE STAFF.LOG\n\n"  # typed before the log, like a DOS prompt
+const TERMINAL_ZOOM_TIME := 0.9  # seconds for the camera to move into / out of the screen
+const TERMINAL_TYPE_DELAY := Vector2(0.02, 0.05)  # random pause between typed characters
+# While reading, the 5155's amber screen fades down to this tint (black with a hint of amber)
+# and its glow to TERMINAL_DIM_GLOW, so the bright amber text stands out on top.
+const TERMINAL_DIM_TINT := Color(0.17, 0.095, 0.03)
+const TERMINAL_SCREEN_GLOW := 0.6
+const TERMINAL_DIM_GLOW := 0.1
 
-enum State { PLAY, INVENTORY, WON, LOST }
+enum State { PLAY, INVENTORY, WON, LOST, READING }
 
 var state := State.PLAY
 ## When false the game never captures the cursor and ignores real mouse movement; clicks
@@ -81,6 +114,7 @@ var blackout := 0.0
 var elapsed := 0.0
 
 var pickups: Array = []
+var lockers: Array = []  # see _locker()
 var heal_count := 0
 var has_key := false
 
@@ -100,6 +134,15 @@ var ammo_label: Label
 var health_label: Label
 var health_bar: ColorRect
 var hurt_flash: ColorRect
+# Terminal reading: camera flies into the IBM's screen and the log types out on it.
+var terminal: Node3D
+var term_label: Label3D
+var term_cam: Camera3D
+var term_full := ""
+var term_shown := 0
+var term_next := 0.0
+var term_typing := false
+var term_ready := false  # camera has arrived at the screen
 var inv_panel: Panel
 var inv_list: ItemList
 var inv_desc: Label
@@ -123,6 +166,7 @@ func _ready() -> void:
 	_build_materials()
 	_build_level()
 	_build_actors()
+	_build_terminal_screen()  # needs the player camera's FOV
 	_build_pickups()
 	_build_ui()
 	_capture_mouse(true)
@@ -285,7 +329,6 @@ func _build_materials() -> void:
 	mats.crate = _mat(_gen_tex("desk"), Color(0.8, 0.6, 0.4))
 	mats.blood = _mat(null, Color(0.18, 0.01, 0.01))
 	mats.fixture = _mat(null, Color(1, 1, 1), false, Color(1.0, 0.9, 0.7), 2.0)
-	mats.screen = _mat(null, Color(0, 0.1, 0), false, Color(0.2, 1.0, 0.4), 1.6)
 	mats.skin = _mat(_gen_tex("skin"), Color.WHITE, false)
 	mats.shirt = _mat(_gen_tex("shirt"), Color.WHITE, false)
 	mats.pants = _mat(_gen_tex("pants"), Color.WHITE, false)
@@ -393,7 +436,7 @@ func _build_level() -> void:
 	_box(Vector3(1.0, 0.3, -25.0), Vector3(0.6, 0.6, 0.6), mats.crate, true, 0.5)
 	_box(Vector3(17.0, 0.3, -32.3), Vector3(0.7, 0.6, 0.6), mats.crate, true, 0.1)
 	_box(Vector3(9.0, 0.3, -24.6), Vector3(0.8, 0.6, 0.6), mats.crate)
-	_box(Vector3(13.4, 0.9, -27.0), Vector3(0.6, 1.8, 2.4), mats.metal)  # storage shelving
+	_locker_row()  # storage room, against the east wall
 	_box(Vector3(8.6, 0.3, -28.6), Vector3(0.6, 0.6, 0.6), mats.crate, true, 0.4)
 	_box(Vector3(0.2, 0.005, -9.0), Vector3(1.0, 0.01, 0.6), mats.blood, false, 0.4)
 	_box(Vector3(-0.9, 0.005, -7.0), Vector3(1.2, 0.01, 0.9), mats.blood, false, -0.2)
@@ -414,14 +457,15 @@ func _build_level() -> void:
 	_ceiling_light(11.0, -27.0, true, Color(0.8, 0.85, 1.0), 0.5)
 	_ceiling_light(24.0, -31.5, true, Color(0.9, 0.7, 0.6), 0.6)
 
-	# Terminal (now just a log with a hint).
-	_box(Vector3(24.0, 0.45, -36.4), Vector3(1.6, 0.9, 0.7), mats.desk)
-	_box(Vector3(24.0, 1.2, -36.55), Vector3(0.7, 0.55, 0.45), mats.metal, false)
-	_box(Vector3(24.0, 1.2, -36.32), Vector3(0.56, 0.42, 0.02), mats.screen, false)
-	_box(Vector3(24.0, 0.92, -36.1), Vector3(0.6, 0.04, 0.2), mats.metal, false)
+	# Terminal (now just a log with a hint): an IBM 5155 portable on the desk, screen to the room.
+	_box(Vector3(24.0, DESK_TOP * 0.5, -36.4), Vector3(1.6, DESK_TOP, 0.7), mats.desk)
+	var ibm := _ibm_5155()
+	world.add_child(ibm)
+	ibm.position = Vector3(24.0, DESK_TOP, -36.42)
+	terminal = ibm
 	var tl := OmniLight3D.new()
 	tl.position = Vector3(24.0, 1.3, -35.8)
-	tl.light_color = Color(0.2, 1.0, 0.4)
+	tl.light_color = Color(1.0, 0.6, 0.15)  # amber, like the 5155's screen
 	tl.light_energy = 0.9
 	tl.omni_range = 3.5
 	world.add_child(tl)
@@ -501,12 +545,15 @@ func _build_pickups() -> void:
 	# door room's far corner by the terminal.
 	_add_pickup("medkit", MEDKIT_HEAL, Vector3(18.8, 0.0, -32.3))
 	_add_pickup("medkit", MEDKIT_HEAL, Vector3(26.9, 0.0, -36.0))
+	# Inside storage lockers: _add_locker_pickup(locker number 0-4 from the entrance end, kind,
+	# amount). Up to two per locker (bottom, then the shelf); hidden until the door is open.
+	_add_locker_pickup(3, "medkit", MEDKIT_HEAL)   # the grey locker
 
 
-func _add_pickup(kind: String, amount: int, pos: Vector3) -> void:
+func _add_pickup(kind: String, amount: int, pos: Vector3, parent: Node3D = null) -> Dictionary:
 	var n := Node3D.new()
 	n.position = pos
-	world.add_child(n)
+	(parent if parent else world).add_child(n)
 	var mi := _item_model(kind)
 	mi.position.y = 0.13
 	n.add_child(mi)
@@ -522,7 +569,58 @@ func _add_pickup(kind: String, amount: int, pos: Vector3) -> void:
 	else:
 		glint.light_color = (mats[kind] as ShaderMaterial).get_shader_parameter("emission_color")
 	n.add_child(glint)
-	pickups.append({"node": n, "mesh": mi, "kind": kind, "amount": amount, "phase": randf()})
+	var p := {"node": n, "mesh": mi, "glint": glint, "kind": kind, "amount": amount, "phase": randf()}
+	pickups.append(p)
+	return p
+
+
+## A pickup inside storage locker `index`: the same pickup as anywhere else, plus a "locker"
+## key: hidden while the door is shut, shown (still) as soon as it starts to open, and only
+## animated and in reach once it's fully open.
+## Each one gets a slot (bottom, then shelf) and is shrunk and its hop lowered as needed so
+## its spin and hop never touch the walls, shelf or door.
+func _add_locker_pickup(index: int, kind: String, amount: int) -> void:
+	var l: Dictionary = lockers[index]
+	if l.items.size() >= LOCKER_SLOTS.size():
+		push_error("Locker %d is full (%d items max)." % [index, LOCKER_SLOTS.size()])
+		return
+	var slot: AABB = LOCKER_SLOTS[l.items.size()]
+	slot = AABB(slot.position * l.scale, slot.size * l.scale)
+	var p := _add_pickup(kind, amount, Vector3(slot.get_center().x, slot.position.y, slot.get_center().z), l.root)
+	var mesh: Node3D = p.mesh
+	var box: AABB = Transform3D(Basis.from_scale(mesh.scale)) * _local_aabb(mesh)
+	# Widest the model gets while spinning (corner of its footprint), plus landing squash.
+	var spin_r := Vector2(maxf(absf(box.position.x), absf(box.end.x)), maxf(absf(box.position.z), absf(box.end.z)))
+	var room := minf(slot.size.x, slot.size.z) * 0.5 - LOCKER_ITEM_MARGIN
+	var fit := minf(1.0, room / (spin_r.length() * 1.12))
+	mesh.scale *= fit
+	p.rest_y = LOCKER_ITEM_MARGIN - box.position.y * fit  # bottom resting on the slot floor
+	var top: float = p.rest_y + box.end.y * fit
+	p.hop = clampf(slot.size.y - LOCKER_ITEM_MARGIN - top, 0.0, PICKUP_HOP)
+	p.glint.position.y = slot.size.y * 0.5
+	p.locker = index
+	p.node.visible = false
+	mesh.position.y = p.rest_y
+	l.items.append(p)
+
+
+## Bounds of every mesh under `n`, in n's own space (ignoring n's transform).
+func _local_aabb(n: Node3D) -> AABB:
+	var box := AABB()
+	var first := true
+	var meshes: Array = n.find_children("*", "MeshInstance3D", true, false)
+	if n is MeshInstance3D:
+		meshes.append(n)
+	for mi: MeshInstance3D in meshes:
+		var xf := Transform3D()
+		var q: Node = mi
+		while q != n:
+			xf = (q as Node3D).transform * xf
+			q = q.get_parent()
+		var b: AABB = xf * mi.mesh.get_aabb()
+		box = b if first else box.merge(b)
+		first = false
+	return box
 
 
 ## The model for a pickup or inventory item ("handgun", "ammo", "heal"/"medkit", "key").
@@ -563,6 +661,169 @@ func _ammo_box() -> Node3D:
 	return holder
 
 
+## IBM 5155 portable (exported from plewr's .blend). Each surface keeps its own baked
+## texture but is drawn with the PS1 shader; the amber screen glows a little. Returned
+## with its base centred on the origin, front (+Z) facing the room.
+func _ibm_5155() -> Node3D:
+	var holder := Node3D.new()
+	var src := IBM_5155.instantiate()
+	var parts: Array = src.find_children("*", "MeshInstance3D", true, false)
+	var box := AABB()
+	for i in parts.size():
+		var mi: MeshInstance3D = parts[i]
+		var xf: Transform3D = mi.transform
+		var p := mi.get_parent()
+		while p != src:
+			xf = (p as Node3D).transform * xf
+			p = p.get_parent()
+		mi.get_parent().remove_child(mi)
+		mi.owner = null
+		mi.transform = xf
+		holder.add_child(mi)
+		var b: AABB = xf * mi.mesh.get_aabb()
+		box = b if i == 0 else box.merge(b)
+		for s in mi.mesh.get_surface_count():
+			var orig := mi.mesh.surface_get_material(s) as BaseMaterial3D
+			if orig and orig.resource_name == "screen":
+				# Remember the screen panel's rectangle (it faces +Z) for the reading view.
+				var verts: PackedVector3Array = mi.mesh.surface_get_arrays(s)[Mesh.ARRAY_VERTEX]
+				var sb := AABB(verts[0], Vector3.ZERO)
+				for v in verts:
+					sb = sb.expand(v)
+				holder.set_meta("screen", xf * sb)
+			var m := ShaderMaterial.new()
+			m.shader = _two_sided_ps1()  # thin parts (handle, cables) are single-sided planes
+			if orig and orig.albedo_texture:
+				m.set_shader_parameter("albedo_tex", orig.albedo_texture)
+			if orig and orig.resource_name == "screen":
+				m.set_shader_parameter("self_glow", TERMINAL_SCREEN_GLOW)
+				holder.set_meta("screen_mat", m)
+			mi.set_surface_override_material(s, m)
+	src.free()
+	var scale := IBM_5155_WIDTH / box.size.x
+	var recentre := Vector3(box.get_center().x, box.position.y, box.get_center().z)
+	for c in holder.get_children():
+		c.position -= recentre
+	var screen: AABB = holder.get_meta("screen")
+	screen.position -= recentre
+	holder.set_meta("screen", screen)
+	holder.scale = Vector3.ONE * scale
+	return holder
+
+
+## The IBM's screen centre and size in world space, and where the reading camera parks
+## so the screen fills most of the view.
+func _terminal_screen() -> Dictionary:
+	var local: AABB = terminal.get_meta("screen")
+	var centre: Vector3 = terminal.global_transform * local.get_center()
+	var size := Vector2(local.size.x, local.size.y) * terminal.scale.x
+	var dist := size.y * 0.5 / 0.85 / tan(deg_to_rad(player.cam.fov * 0.5))
+	return {"centre": centre, "size": size, "eye": centre + Vector3(0, 0, dist)}
+
+
+## Amber Label3D on the 5155's screen, hidden until it's read. The screen itself is
+## dimmed underneath (see _set_screen_dim) rather than covered, so nothing z-fights with
+## the PS1 shader's vertex snapping.
+func _build_terminal_screen() -> void:
+	var scr := _terminal_screen()
+	term_label = Label3D.new()
+	term_label.visible = false
+	term_label.pixel_size = 0.0008
+	term_label.font_size = 22
+	term_label.outline_size = 0
+	term_label.modulate = Color(1.0, 0.66, 0.2)
+	term_label.shaded = false
+	term_label.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
+	term_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	term_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	term_label.vertical_alignment = VERTICAL_ALIGNMENT_TOP
+	var margin := 0.012
+	term_label.width = (scr.size.x - margin * 2.0) / term_label.pixel_size
+	# Left/top-aligned text starts at the node, so pin it to the screen's top-left corner,
+	# 1cm off the glass so the snapped screen vertices never poke through it.
+	world.add_child(term_label)
+	term_label.global_position = Vector3(scr.centre.x - scr.size.x * 0.5 + margin, scr.centre.y + scr.size.y * 0.5 - margin, scr.centre.z + 0.01)
+
+
+## 0 = the screen's normal bright amber, 1 = dimmed to near-black for reading.
+func _set_screen_dim(t: float) -> void:
+	var m: ShaderMaterial = terminal.get_meta("screen_mat")
+	m.set_shader_parameter("tint", Color.WHITE.lerp(TERMINAL_DIM_TINT, t))
+	m.set_shader_parameter("self_glow", lerp(TERMINAL_SCREEN_GLOW, TERMINAL_DIM_GLOW, t))
+
+
+func _open_terminal() -> void:
+	state = State.READING
+	player.enabled = false
+	player.velocity = Vector3.ZERO
+	term_full = TERMINAL_HEADER + TERMINAL_LOG
+	term_shown = 0
+	term_next = 0.3
+	term_typing = false
+	term_ready = false
+	term_label.font = mono
+	term_label.text = ""
+	term_label.visible = true
+	sfx.tone(980.0, 0.05)  # the old terminal beep, now as the screen wakes
+	term_cam = Camera3D.new()
+	term_cam.fov = player.cam.fov
+	term_cam.near = 0.02
+	world.add_child(term_cam)
+	term_cam.global_transform = player.cam.global_transform
+	term_cam.current = true
+	var scr := _terminal_screen()
+	var target := Transform3D(Basis(), scr.eye)  # identity basis looks down -Z, straight at the screen
+	var tw := create_tween()
+	tw.tween_property(term_cam, "global_transform", target, TERMINAL_ZOOM_TIME).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	tw.parallel().tween_method(_set_screen_dim, 0.0, 1.0, TERMINAL_ZOOM_TIME)
+	tw.tween_callback(func():
+		term_ready = true
+		term_typing = true)
+
+
+## Back out of the screen. `instant` (e.g. a zombie hit) skips the camera move.
+func _close_terminal(instant := false) -> void:
+	if state != State.READING or term_cam == null:
+		return
+	term_typing = false
+	term_ready = false
+	var cam := term_cam
+	term_cam = null
+	term_label.visible = false
+	var finish := func():
+		player.cam.current = true
+		cam.queue_free()
+		_set_screen_dim(0.0)
+		if state == State.READING:
+			state = State.PLAY
+			player.enabled = true
+	if instant:
+		finish.call()
+		return
+	var tw := create_tween()
+	tw.tween_property(cam, "global_transform", player.cam.global_transform, TERMINAL_ZOOM_TIME * 0.7).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	tw.parallel().tween_method(_set_screen_dim, 1.0, 0.0, TERMINAL_ZOOM_TIME * 0.7)
+	tw.tween_callback(finish)
+
+
+## Types the log out a character at a time with key clicks, then blinks a cursor.
+func _update_terminal(delta: float) -> void:
+	if term_typing:
+		term_next -= delta
+		while term_next <= 0.0 and term_shown < term_full.length():
+			var ch := term_full[term_shown]
+			term_shown += 1
+			if ch != " " and ch != "\n":
+				sfx.key_click()
+			term_next += randf_range(TERMINAL_TYPE_DELAY.x, TERMINAL_TYPE_DELAY.y)
+			if ch == "." or ch == ":" or ch == "\n":
+				term_next += 0.18
+		if term_shown >= term_full.length():
+			term_typing = false
+	var cursor := "_" if fmod(Time.get_ticks_msec() / 1000.0, 0.8) < 0.45 else " "
+	term_label.text = term_full.substr(0, term_shown) + cursor
+
+
 ## "Health kit" from the PSX Med Pack. Its emissive texture is the same image as its
 ## colour, so the glow is the PS1 shader's self_glow, turned down to a faint MEDKIT_GLOW.
 func _medkit() -> Node3D:
@@ -582,6 +843,140 @@ func _medkit() -> Node3D:
 	m.set_shader_parameter("self_glow", MEDKIT_GLOW)
 	kit.material_override = m
 	return holder
+
+
+## A row of lockers backed against the storage room's east wall, doors facing into the room.
+func _locker_row() -> void:
+	for i in LOCKER_ROW.size():
+		var l := _locker(LOCKER_ROW[i])
+		var size: Vector3 = l.size
+		var z := LOCKER_ROW_CENTRE.z + (i - (LOCKER_ROW.size() - 1) * 0.5) * size.x
+		l.root.position = Vector3(LOCKER_ROW_CENTRE.x - size.z * 0.5, 0.0, z)
+		l.root.rotation.y = -PI / 2  # model front (+Z) to face west (-X)
+		world.add_child(l.root)
+		lockers.append(l)
+
+
+## One locker: a StaticBody3D cabinet (origin bottom centre, front +Z) and a door that swings
+## open about a hinge on its right front edge. The door has its own collision and turns with
+## the pivot node. Returned as a dict:
+##   root, pivot (hinge, rotation.y = swing angle), size, scale,
+##   swing (0 shut .. 1 fully open), opening (where it's heading), step_t, door_len, door_thick,
+##   items (the pickups inside).
+func _locker(model: String) -> Dictionary:
+	var root := StaticBody3D.new()
+	var src: Node3D = LOCKER_MODELS[model].instantiate()
+	var body: MeshInstance3D = src.find_child("Locker", true, false)
+	var door: MeshInstance3D = src.find_child("Door", true, false)
+	var scale := LOCKER_HEIGHT / body.mesh.get_aabb().size.y
+	var hinge := door.position * scale
+	for mi: MeshInstance3D in [body, door]:
+		mi.get_parent().remove_child(mi)
+		mi.owner = null
+		var orig := mi.mesh.surface_get_material(0) as BaseMaterial3D
+		var m := ShaderMaterial.new()
+		m.shader = _two_sided_ps1()  # the insides and the back of the door show when it's open
+		if orig and orig.albedo_texture:
+			m.set_shader_parameter("albedo_tex", orig.albedo_texture)
+		mi.material_override = m
+	src.free()
+	root.add_child(body)
+	body.scale = Vector3.ONE * scale
+	var pivot := Node3D.new()
+	pivot.name = "DoorPivot"
+	pivot.position = hinge
+	root.add_child(pivot)
+	pivot.add_child(door)
+	door.transform = Transform3D(Basis.from_scale(Vector3.ONE * scale), Vector3.ZERO)
+	var door_box := door.mesh.get_aabb()
+	door_box = AABB(door_box.position * scale, door_box.size * scale)
+	var door_body := StaticBody3D.new()
+	door_body.add_child(_box_shape(door_box))
+	pivot.add_child(door_body)
+	var body_box := body.mesh.get_aabb()
+	root.add_child(_box_shape(AABB(body_box.position * scale, body_box.size * scale)))
+	return {
+		"root": root, "pivot": pivot, "size": body_box.size * scale, "scale": scale,
+		"swing": 0.0, "opening": false, "step_t": 0.0,
+		"door_len": maxf(absf(door_box.position.x), absf(door_box.end.x)),
+		"door_thick": door_box.size.z, "items": [],
+	}
+
+
+func _box_shape(b: AABB) -> CollisionShape3D:
+	var cs := CollisionShape3D.new()
+	var shape := BoxShape3D.new()
+	shape.size = b.size.max(Vector3.ONE * 0.05)
+	cs.shape = shape
+	cs.position = b.get_center()
+	return cs
+
+
+## The locker you're facing within LOCKER_REACH, or {}.
+func _target_locker() -> Dictionary:
+	var cam: Vector3 = player.cam.global_position
+	var fwd: Vector3 = -player.cam.global_transform.basis.z
+	fwd = Vector3(fwd.x, 0.0, fwd.z).normalized()
+	var best := {}
+	var best_dot := 0.7
+	for l in lockers:
+		var front: Vector3 = l.root.global_transform * Vector3(0.0, 0.0, l.size.z * 0.5)
+		if _flat_dist(cam, front) > LOCKER_REACH:
+			continue
+		var to := Vector3(front.x - cam.x, 0.0, front.z - cam.z).normalized()
+		if fwd.dot(to) > best_dot:
+			best = l
+			best_dot = fwd.dot(to)
+	return best
+
+
+func _toggle_locker(l: Dictionary) -> void:
+	l.opening = not l.opening
+	sfx.locker_sound("open" if l.opening else "close", l.root)
+	for p in l.items:
+		_animate_pickup(p)  # show / settle the contents this frame, not the next
+
+
+## Swings doors toward open/shut in LOCKER_ANIM_FPS steps (eased like a real door). A door
+## that would hit the player or a zombie waits where it is until they move.
+func _update_lockers(delta: float) -> void:
+	var step := 1.0 / LOCKER_ANIM_FPS
+	for l in lockers:
+		var goal := 1.0 if l.opening else 0.0
+		if l.swing == goal:
+			l.step_t = 0.0
+			continue
+		l.step_t += delta
+		while l.step_t >= step and l.swing != goal:
+			l.step_t -= step
+			var next := move_toward(l.swing, goal, step / LOCKER_SWING_TIME)
+			if _door_blocked(l, next):
+				l.step_t = 0.0
+				break
+			l.swing = next
+		l.pivot.rotation.y = deg_to_rad(_door_angle(l.swing))
+
+
+func _door_angle(swing: float) -> float:
+	return LOCKER_OPEN_ANGLE * (0.5 - 0.5 * cos(PI * swing))
+
+
+## Whether the door at `swing` would overlap the player or a living zombie (2D, top-down:
+## the door is a segment from the hinge to its free edge).
+func _door_blocked(l: Dictionary, swing: float) -> bool:
+	var a := deg_to_rad(_door_angle(swing))
+	var h: Vector3 = l.pivot.position
+	var tip: Vector3 = h + Vector3(-cos(a), 0.0, sin(a)) * l.door_len
+	var bodies := [[player, 0.35]]
+	for z in zombies:
+		if z.mode != z.DEAD:
+			bodies.append([z, 0.3])
+	for b in bodies:
+		var p: Vector3 = l.root.to_local(b[0].global_position)
+		var c := Geometry2D.get_closest_point_to_segment(Vector2(p.x, p.z), Vector2(h.x, h.z), Vector2(tip.x, tip.z))
+		if c.distance_to(Vector2(p.x, p.z)) < b[1] + l.door_thick * 0.5 + 0.02:
+			return true
+	return false
 
 
 var _two_sided_shader: Shader
@@ -945,6 +1340,16 @@ func _unhandled_input(event: InputEvent) -> void:
 		elif event.is_action_pressed("flashlight"):
 			player.toggle_flashlight()
 			sfx.click()
+	elif state == State.READING:
+		if event.is_action_pressed("interact"):
+			if term_typing or not term_ready:
+				# First press finishes the text (and the camera move); the next one closes.
+				term_shown = term_full.length()
+				term_typing = term_ready
+			else:
+				_close_terminal()
+		elif event.is_action_pressed("ui_cancel"):
+			_close_terminal()
 	elif event.is_action_pressed("restart") and (state == State.WON or state == State.LOST):
 		get_tree().paused = false
 		get_tree().reload_current_scene()
@@ -996,6 +1401,8 @@ func _puff(pos: Vector3, mat: Material, count: int) -> void:
 
 
 func _on_zombie_attack(damage: int, z: Node3D) -> void:
+	if state == State.READING:
+		_close_terminal(true)  # a hit yanks you out of the screen
 	if state != State.PLAY:
 		return
 	player.take_damage(damage, z.global_position)
@@ -1010,11 +1417,12 @@ func _interact() -> void:
 	var p := _target_pickup()
 	if not p.is_empty():
 		_collect(p)
+	elif not _target_locker().is_empty():
+		_toggle_locker(_target_locker())
 	elif _near_door():
 		_try_door()
 	elif _near_terminal():
-		show_msg(TERMINAL_LOG, 5.0)
-		sfx.tone(980.0, 0.05)
+		_open_terminal()
 
 
 func _target_pickup() -> Dictionary:
@@ -1023,8 +1431,8 @@ func _target_pickup() -> Dictionary:
 	var best := {}
 	var best_d := 1e9
 	for p in pickups:
-		if p.kind == "medkit":
-			continue  # walked over, not picked up with E
+		if p.kind == "medkit" or not _pickup_ready(p):
+			continue  # med kits are walked over; locker items wait for the door
 		var pos: Vector3 = p.node.global_position
 		var d := _flat_dist(cam, pos)
 		var facing := fwd.dot((pos - cam).normalized())
@@ -1048,8 +1456,22 @@ func _collect(p: Dictionary) -> void:
 			blackout = 0.6
 			riser.rise()
 	sfx.pickup()
+	_remove_pickup(p)
+
+
+func _remove_pickup(p: Dictionary) -> void:
 	p.node.queue_free()
 	pickups.erase(p)
+	if p.has("locker"):
+		lockers[p.locker].items.erase(p)
+
+
+## Out in the level: always. In a locker: only once its door is fully open (and not closing).
+func _pickup_ready(p: Dictionary) -> bool:
+	if not p.has("locker"):
+		return true
+	var l: Dictionary = lockers[p.locker]
+	return l.opening and l.swing >= 1.0
 
 
 func _near_door() -> bool:
@@ -1098,6 +1520,7 @@ func _physics_process(delta: float) -> void:
 	var hurt: float = 1.0 - player.health / float(Player.MAX_HEALTH)
 	sfx.heart_vol = max(fear, hurt * 0.7) * 0.6
 	sfx.heart_bpm = lerp(70.0, 150.0, max(fear, hurt))
+	_update_lockers(delta)
 	_walk_over_medkits()
 	if door_unlocked and player.global_position.x > EXIT_X:
 		_win()
@@ -1110,27 +1533,39 @@ func _walk_over_medkits() -> void:
 	if player.health >= Player.MAX_HEALTH:
 		return
 	for p in pickups.duplicate():
-		if p.kind == "medkit" and _flat_dist(player.global_position, p.node.global_position) < MEDKIT_REACH:
+		if p.kind == "medkit" and _pickup_ready(p) and _flat_dist(player.global_position, p.node.global_position) < MEDKIT_REACH:
 			player.heal(p.amount)
 			show_msg("Used a first aid kit. (+%d)" % p.amount)
 			sfx.pickup()
-			p.node.queue_free()
-			pickups.erase(p)
+			_remove_pickup(p)
 
 
 func _animate_pickup(p: Dictionary) -> void:
+	var base: float = p.mesh.get_meta("base_scale", p.mesh.scale.x)
+	p.mesh.set_meta("base_scale", base)
+	var rest_y: float = p.get("rest_y", 0.13)
+	# Locker items show (glint too) from the moment the door starts to open until it's shut
+	# again, but sit still at rest until it's fully open.
+	if p.has("locker"):
+		var l: Dictionary = lockers[p.locker]
+		p.node.visible = l.opening or l.swing > 0.0
+	if not _pickup_ready(p):
+		p.mesh.position.y = rest_y
+		p.mesh.rotation.y = 0.0
+		p.mesh.scale = Vector3.ONE * base
+		return
 	var t: float = floor(elapsed * PICKUP_ANIM_FPS) / PICKUP_ANIM_FPS + p.phase * 10.0
 	var hop: float = fposmod(t * PICKUP_HOP_RATE, 1.0)
 	var h := 4.0 * hop * (1.0 - hop)  # ballistic arc: 0 on the ground, 1 at the top
 	var squash: float = max(0.0, 1.0 - hop * 8.0) + max(0.0, hop * 8.0 - 7.0)  # first/last 1/8 of the hop
-	p.mesh.position.y = 0.13 + PICKUP_HOP * h
+	p.mesh.position.y = rest_y + p.get("hop", PICKUP_HOP) * h
 	p.mesh.rotation.y = t * PICKUP_SPIN
-	var base: float = p.mesh.get_meta("base_scale", p.mesh.scale.x)
-	p.mesh.set_meta("base_scale", base)
 	p.mesh.scale = Vector3(base * (1.0 + 0.12 * squash), base * (1.0 - 0.2 * squash), base * (1.0 + 0.12 * squash))
 
 
 func _process(delta: float) -> void:
+	if state == State.READING and term_label.visible:
+		_update_terminal(delta)
 	if state == State.INVENTORY and preview_pivot:
 		preview_idle += delta
 		if not preview_drag and preview_idle > 1.5:
@@ -1169,10 +1604,14 @@ func _process(delta: float) -> void:
 		var p := _target_pickup()
 		if not p.is_empty():
 			prompt = "[E] Pick up %s" % ITEM_NAMES[p.kind]
+		elif not _target_locker().is_empty():
+			prompt = "[E] Close locker" if _target_locker().opening else "[E] Open locker"
 		elif _near_door() and not door_unlocked:
 			prompt = "[E] Use Exit Keycard" if has_key else "[E] Door (locked)"
 		elif _near_terminal():
 			prompt = "[E] Read terminal"
+	elif state == State.READING and term_cam:
+		prompt = "[E] Skip" if term_typing or not term_ready else "[E] Close"
 	prompt_label.text = prompt
 
 
